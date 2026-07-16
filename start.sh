@@ -74,13 +74,12 @@ fi
 
 # ---- 5. get the viewer URL onto the phone -----------------------------------
 url="http://$ip:$PORT/vr.html"
-if adb_ok; then
-    adb shell am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1 \
-        && say "opened $url on the phone — tap once for fullscreen/audio" \
-        || say "adb couldn't open the page — open $url on the phone"
+say "viewer URL: $url"
+command -v qrencode >/dev/null && qrencode -t ANSIUTF8 "$url"
+if adb_ok && adb shell am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1; then
+    say "opened it on the phone via adb — tap once for fullscreen/audio"
 else
-    say "open this on the phone:  $url"
-    command -v qrencode >/dev/null && qrencode -t ANSIUTF8 "$url"
+    say "scan the QR (or type the URL) on the phone"
 fi
 
 say "done. leave this window; Ctrl-C won't kill the stream."

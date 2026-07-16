@@ -57,15 +57,27 @@ const video = document.getElementById('feed');
 const canvas = document.getElementById('glcanvas');
 const setStatus = (t) => { statusEl.textContent = t; };
 
-// --- per-device view tuning, persisted ---
+// --- view tuning, persisted on the PC — the viewer URL (tethering IP)
+// changes per session, so per-origin localStorage alone forgets everything ---
 const cfg = Object.assign({ scale: 0.85, sep: 0, k: 1.0 },
   JSON.parse(localStorage.getItem('cbm-cfg') || '{}'));
-function applyCfg() {
+let saveTimer = null;
+function applyCfg(save = true) {
   cfg.k = Math.max(0, cfg.k);
   document.getElementById('kVal').textContent = cfg.k.toFixed(1);
   localStorage.setItem('cbm-cfg', JSON.stringify(cfg));
+  if (save) {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      fetch('/cfg', { method: 'POST', body: JSON.stringify(cfg) }).catch(() => {});
+    }, 500);
+  }
 }
-applyCfg();
+applyCfg(false);
+fetch('/cfg').then((r) => r.json()).then((remote) => {
+  Object.assign(cfg, remote);
+  applyCfg(false);
+}).catch(() => {});
 
 hud.addEventListener('click', (e) => e.stopPropagation());
 function enableAudio() {  // browsers require a gesture before audible playback

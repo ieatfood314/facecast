@@ -22,6 +22,10 @@ queues: dict[str, list[str]] = {}
 last_poll: dict[str, float] = {}  # channel -> last time someone drained it
 lock = threading.Lock()
 
+# viewer settings live on the PC: the phone's localStorage is keyed by origin,
+# and the viewer URL (tethering IP) changes every session
+CFG_PATH = pathlib.Path.home() / ".local" / "state" / "facecast" / "cfg.json"
+
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -29,6 +33,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
+        if url.path == "/cfg":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                json.loads(body)
+            except Exception:
+                self.send_error(400)
+                return
+            with lock:
+                CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                CFG_PATH.write_bytes(body)
+            self.send_response(204)
+            self.end_headers()
+            return
         if url.path != "/signal":
             self.send_error(404)
             return
@@ -55,6 +73,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "sender": now - last_poll.get("to-sender", 0) < 2,
                     "viewer": now - last_poll.get("to-viewer", 0) < 2,
                 }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if url.path == "/cfg":
+            with lock:
+                data = CFG_PATH.read_bytes() if CFG_PATH.exists() else b"{}"
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
