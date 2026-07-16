@@ -10,7 +10,7 @@ depends=('python' 'bash' 'curl' 'iproute2' 'networkmanager' 'xdg-utils')
 optdepends=('android-tools: enable tethering and open the viewer on the phone automatically'
             'qrencode: show the viewer URL as a QR code')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('8f869ecac44e5f23ba622ef609ca1cde4e1bbdcb04621248f400269da56e8528')
 
 package() {
   cd "$pkgname-$pkgver"
