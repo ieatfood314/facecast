@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Facecast
+Comment=Mirror the desktop to a phone in a Cardboard headset
+Exec=facecast
+Icon=phone
+Terminal=true
+Categories=Utility;

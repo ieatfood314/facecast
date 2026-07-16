@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>facecast — viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+               font-family: sans-serif; -webkit-tap-highlight-color: transparent; }
+  #glcanvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+  /* the video is only a decode surface for the WebGL texture; keep it
+     technically visible so the browser keeps rendering frames */
+  #feed { position: fixed; width: 2px; height: 2px; opacity: 0.01;
+          pointer-events: none; }
+  #divider { position: fixed; left: 50%; top: 0; bottom: 0; width: 1px;
+             background: #222; }
+  #hud { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+         background: rgba(20, 22, 26, .92); color: #e6e6e6; border-radius: 12px;
+         padding: 1rem; text-align: center; z-index: 10; }
+  #hud.hidden { display: none; }
+  #hud button { font-size: 1.3rem; min-width: 3.2rem; padding: .5rem;
+                margin: .2rem; border: none; border-radius: 8px;
+                background: #3b82f6; color: #fff; }
+  #hud .row { margin: .4rem 0; color: #9ca3af; }
+  #status { position: fixed; top: .5rem; left: 0; right: 0; text-align: center;
+            color: #9ca3af; font-size: .8rem; z-index: 5; pointer-events: none; }
+</style>
+</head>
+<body>
+<video id="feed" autoplay muted playsinline></video>
+<canvas id="glcanvas"></canvas>
+<div id="divider"></div>
+<div id="status">waiting for the PC to start sharing…</div>
+
+<div id="hud">
+  <div class="row"><button id="fsBtn">⛶ Fullscreen + landscape</button></div>
+  <div class="row">size
+    <button data-k="scale" data-d="-0.05">−</button>
+    <button data-k="scale" data-d="0.05">+</button>
+    &nbsp; eye distance
+    <button data-k="sep" data-d="-5">−</button>
+    <button data-k="sep" data-d="5">+</button>
+  </div>
+  <div class="row">lens curve
+    <button data-k="k" data-d="-0.1">−</button>
+    <button data-k="k" data-d="0.1">+</button>
+    <span id="kVal"></span>
+  </div>
+  <div class="row">tap anywhere to hide/show this panel</div>
+</div>
+
+<script>
+const GRID_TEST = new URLSearchParams(location.search).has('grid');
+const statusEl = document.getElementById('status');
+const hud = document.getElementById('hud');
+const video = document.getElementById('feed');
+const canvas = document.getElementById('glcanvas');
+const setStatus = (t) => { statusEl.textContent = t; };
+
+// --- per-device view tuning, persisted ---
+const cfg = Object.assign({ scale: 0.85, sep: 0, k: 1.0 },
+  JSON.parse(localStorage.getItem('cbm-cfg') || '{}'));
+function applyCfg() {
+  cfg.k = Math.max(0, cfg.k);
+  document.getElementById('kVal').textContent = cfg.k.toFixed(1);
+  localStorage.setItem('cbm-cfg', JSON.stringify(cfg));
+}
+applyCfg();
+
+hud.addEventListener('click', (e) => e.stopPropagation());
+function enableAudio() {  // browsers require a gesture before audible playback
+  video.muted = false;
+  video.play().catch(() => {});
+}
+document.body.addEventListener('click', () => {
+  enableAudio();
+  hud.classList.toggle('hidden');
+});
+for (const b of hud.querySelectorAll('button[data-k]')) {
+  b.onclick = () => {
+    cfg[b.dataset.k] = Math.round((cfg[b.dataset.k] + Number(b.dataset.d)) * 100) / 100;
+    applyCfg();
+  };
+}
+document.getElementById('fsBtn').onclick = async () => {
+  enableAudio();
+  await document.documentElement.requestFullscreen().catch(() => {});
+  try { await screen.orientation.lock('landscape'); } catch (e) {}
+  try { await navigator.wakeLock.request('screen'); } catch (e) {}
+  hud.classList.add('hidden');
+};
+
+// --- WebGL: render the video twice with barrel pre-distortion, so the
+// Cardboard lenses' pincushion distortion cancels out ---
+const gl = canvas.getContext('webgl', { antialias: false });
+
+function shader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, `
+  attribute vec2 aPos; varying vec2 vUV;
+  void main() { gl_Position = vec4(aPos, 0., 1.); vUV = aPos * .5 + .5; }
+`));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, `
+  precision mediump float;
+  varying vec2 vUV;
+  uniform sampler2D uTex;
+  uniform vec2  uFit;       // displayed fraction of the eye viewport (w, h)
+  uniform float uEyeAspect; // eye viewport width / height
+  uniform float uK1, uK2;   // radial distortion coefficients
+  uniform float uSep;       // horizontal convergence offset (uv units)
+  uniform float uEyeSign;   // +1 = left eye, -1 = right eye
+  void main() {
+    vec2 c = vUV - .5;
+    vec2 pn = c * vec2(uEyeAspect, 1.);      // isotropic lens coords
+    float r2 = dot(pn, pn) * 4.;             // r = 1 at top/bottom edge
+    float f = 1. + uK1 * r2 + uK2 * r2 * r2;
+    vec2 vp = (pn * f) / vec2(uEyeAspect, 1.);
+    vec2 uv = vp / uFit + .5;
+    uv.x -= uSep * uEyeSign;
+    if (uv.x < 0. || uv.x > 1. || uv.y < 0. || uv.y > 1.) {
+      gl_FragColor = vec4(0., 0., 0., 1.);
+    } else {
+      gl_FragColor = texture2D(uTex, uv);
+    }
+  }
+`));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+  throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER,
+  new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+const U = {};
+for (const n of ['uFit', 'uEyeAspect', 'uK1', 'uK2', 'uSep', 'uEyeSign'])
+  U[n] = gl.getUniformLocation(prog, n);
+
+let srcW = 0, srcH = 0;
+
+function gridSource() {  // ?grid — static test pattern, no WebRTC
+  const c = document.createElement('canvas');
+  c.width = 1280; c.height = 720;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#123'; ctx.fillRect(0, 0, 1280, 720);
+  ctx.strokeStyle = '#7fd'; ctx.lineWidth = 2;
+  for (let x = 0; x <= 1280; x += 80) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 720); ctx.stroke();
+  }
+  for (let y = 0; y <= 720; y += 80) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(1280, y); ctx.stroke();
+  }
+  ctx.fillStyle = '#f59e0b'; ctx.font = 'bold 60px sans-serif';
+  ctx.fillText('GRID TEST', 480, 380);
+  return c;
+}
+const grid = GRID_TEST ? gridSource() : null;
+
+function draw() {
+  requestAnimationFrame(draw);
+  const source = grid || (video.readyState >= 2 ? video : null);
+  if (!source) return;
+  srcW = source.videoWidth || source.width;
+  srcH = source.videoHeight || source.height;
+  if (!srcW || !srcH) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(canvas.clientWidth * dpr);
+  const h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+  }
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, source);
+
+  const eyeW = w / 2, eyeH = h;
+  const s = Math.min(eyeW / srcW, eyeH / srcH) * cfg.scale;
+  gl.uniform2f(U.uFit, (srcW * s) / eyeW, (srcH * s) / eyeH);
+  gl.uniform1f(U.uEyeAspect, eyeW / eyeH);
+  gl.uniform1f(U.uK1, 0.22 * cfg.k);
+  gl.uniform1f(U.uK2, 0.24 * cfg.k * cfg.k);
+  gl.uniform1f(U.uSep, (cfg.sep * dpr) / eyeW);
+
+  gl.viewport(0, 0, eyeW, eyeH);
+  gl.uniform1f(U.uEyeSign, 1);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.viewport(eyeW, 0, eyeW, eyeH);
+  gl.uniform1f(U.uEyeSign, -1);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+draw();
+if (GRID_TEST) setStatus('grid test mode — no stream');
+
+// --- WebRTC receive side ---
+let pc = null;
+let connected = false;
+const pendingIce = [];
+
+async function post(ch, msg) {
+  await fetch('/signal?ch=' + ch, { method: 'POST', body: JSON.stringify(msg) });
+}
+
+async function hello() {
+  if (!connected) {
+    try { await post('to-sender', { type: 'hello', host: location.hostname }); } catch (e) {}
+    setTimeout(hello, 3000);
+  }
+}
+
+async function handle(msg) {
+  if (msg.type === 'offer') {
+    setStatus('PC found — negotiating video link…');
+    if (pc) pc.close();
+    connected = false;
+    pendingIce.length = 0;
+    pc = new RTCPeerConnection();
+    pc.ontrack = (e) => {
+      video.srcObject = e.streams[0];
+      video.play().catch(() => {});
+      for (const r of pc.getReceivers()) {
+        try { r.playoutDelayHint = 0; } catch (err) {}
+        try { r.jitterBufferTarget = 0; } catch (err) {}
+      }
+    };
+    pc.onicecandidate = (e) => {
+      if (e.candidate) post('to-sender', { type: 'ice', candidate: e.candidate });
+    };
+    pc.onconnectionstatechange = () => {
+      setStatus(pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        connected = true;
+        setTimeout(() => { if (connected) statusEl.textContent = ''; }, 2000);
+      }
+      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
+        connected = false;
+        hello();
+      }
+    };
+    await pc.setRemoteDescription(msg.sdp);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await post('to-sender', { type: 'answer', sdp: pc.localDescription });
+    while (pendingIce.length) {
+      try { await pc.addIceCandidate(pendingIce.shift()); } catch (e) {}
+    }
+  } else if (msg.type === 'ice') {
+    if (pc && pc.remoteDescription) {
+      try { await pc.addIceCandidate(msg.candidate); } catch (e) {}
+    } else {
+      pendingIce.push(msg.candidate);
+    }
+  }
+}
+
+async function poll() {
+  while (true) {
+    try {
+      const r = await fetch('/signal?ch=to-viewer');
+      for (const raw of await r.json()) await handle(JSON.parse(raw));
+    } catch (e) { setStatus('server unreachable, retrying…'); }
+    await new Promise((res) => setTimeout(res, 300));
+  }
+}
+
+if (!GRID_TEST) { hello(); poll(); }
+</script>
+</body>
+</html>
